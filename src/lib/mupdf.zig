@@ -8,31 +8,50 @@ const file_scope = @This();
 
 const page_allocator = std.heap.page_allocator;
 
-const MuPdfError = error{
+pub const MuPdfError = error{
     ContextCreate,
     DocumentCreate,
     DocumentOpen,
     DocumentSave,
     DocumentOperation,
+    IndexOutOfRange,
 };
 
-const BatchItem = struct {
+const OutputItem = struct {
     memory: []const u8,
-    handle: *mupdf.fz_stream,
+    stream_handle: *mupdf.fz_stream,
+    pdf_handle: *mupdf.pdf_document,
+    page_offset: c_int,
+    length: c_int,
 };
-const BatchItemList = std.ArrayList(BatchItem);
+
+const PageIndices = struct { start: c_int, length: c_int };
+
+const OutputItemList = std.ArrayList(OutputItem);
 
 pub const Context = struct {
     arena_allocator: std.heap.ArenaAllocator,
+    scratch_allocator: std.heap.FixedBufferAllocator,
     handle: *mupdf.fz_context,
-    current_batch_items: ?BatchItemList,
-    current_batch_size: u64,
+    current_output_items: ?OutputItemList,
+    current_output_size: u64,
 
     const Self = @This();
 
     pub fn init(allocator: Allocator) !Self {
         const mupdf_context = try createContext();
-        return Self{ .arena_allocator = std.heap.ArenaAllocator.init(allocator), .handle = mupdf_context, .current_batch_items = null, .current_batch_size = 0 };
+        errdefer destroyContext(mupdf_context);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        const scratch_buffer = try arena.allocator().alloc(u8, 1024 * 1024 * 4);
+        return Self{ .arena_allocator = std.heap.ArenaAllocator.init(allocator), .scratch_allocator = std.heap.FixedBufferAllocator.init(scratch_buffer), .handle = mupdf_context, .current_output_items = null, .current_output_size = 0 };
+    }
+
+    pub fn hideWarnings(self: *Self) void {
+        mupdf.fz_set_warning_callback(self.handle, warningHandler, null);
+    }
+
+    pub fn hideErrors(self: *Self) void {
+        mupdf.fz_set_error_callback(self.handle, errorHandler, null);
     }
 
     pub fn deinit(self: Self) void {
@@ -40,32 +59,59 @@ pub const Context = struct {
         destroyContext(self.handle);
     }
 
-    pub fn openBatch(self: *Self) !void {
-        if (self.current_batch_items) |_| {
-            return error.ExistingBatch;
+    pub fn openOutput(self: *Self) !void {
+        if (self.current_output_items) |_| {
+            return error.ExistingOutput;
         }
 
         const allocator = self.arena_allocator.allocator();
-        self.current_batch_items = try BatchItemList.initCapacity(allocator, 1024);
+        self.current_output_items = try OutputItemList.initCapacity(allocator, 1024);
     }
 
-    pub fn addSourceBuffer(self: *Self, buffer: []const u8) void {
+    pub fn dropOutput(self: *Self) void {
+        if (self.current_output_items) |curr_batch| {
+            for (curr_batch.items) |item| {
+                self.destroyPdf(item.pdf_handle);
+                mupdf.fz_drop_stream(self.handle, item.stream_handle);
+            }
+            self.current_output_items.?.clearRetainingCapacity();
+        } else return;
+    }
+
+    pub fn addPdf(self: *Self, buffer: []const u8, raw_page_offset: ?c_int, raw_length: ?c_int) MuPdfError!void {
         const fz_stream = mupdf.fz_open_memory(self.handle, buffer.ptr, buffer.len) orelse unreachable;
-        self.current_batch_size += buffer.len;
-        self.current_batch_items.?.append(.{ .memory = buffer, .handle = fz_stream }) catch unreachable;
+        errdefer mupdf.fz_drop_stream(self.handle, fz_stream);
+
+        const pdf_handle = try file_scope.createPdfFromStream(self.handle, fz_stream);
+        const num_pages = self.getPageCount(pdf_handle);
+
+        const page_offset = min: {
+            if (raw_page_offset) |i| {
+                if (i < 0 or i >= num_pages) return MuPdfError.IndexOutOfRange;
+                break :min i;
+            } else break :min 0;
+        };
+
+        const length = max: {
+            if (raw_length) |i| {
+                if (i < 0 or i >= num_pages or (i + page_offset) > num_pages) return MuPdfError.IndexOutOfRange;
+                break :max i;
+            } else break :max num_pages - page_offset;
+        };
+
+        self.current_output_size += buffer.len;
+        self.current_output_items.?.append(
+            .{ .page_offset = page_offset, .length = length, .memory = buffer, .stream_handle = fz_stream, .pdf_handle = pdf_handle },
+        ) catch unreachable;
     }
 
-    fn batch(self: *Self) BatchItemList {
-        if (self.current_batch_items == null) unreachable;
-        return self.current_batch_items.?;
+    fn currentOutputItems(self: *Self) []OutputItem {
+        if (self.current_output_items == null) unreachable;
+        return self.current_output_items.?.items;
     }
 
     fn createPdf(self: Self) !*mupdf.pdf_document {
         return file_scope.createPdf(self.handle);
-    }
-
-    fn createPdfFromStream(self: Self, batch_item: BatchItem) !*mupdf.pdf_document {
-        return file_scope.createPdfFromStream(self.handle, batch_item.handle);
     }
 
     fn destroyPdf(self: Self, doc: *mupdf.pdf_document) void {
@@ -95,15 +141,13 @@ pub const Context = struct {
         return graft_map.?;
     }
 
-    fn copyPagesToPdf(self: *Self, src_pdf: *mupdf.pdf_document, dest_pdf: *mupdf.pdf_document, dest_offset: c_int, num_pages: c_int) !void {
+    fn graftPagesOntoOutput(self: *Self, src_pdf: *mupdf.pdf_document, dest_pdf: *mupdf.pdf_document, src_offset: c_int, num_pages: c_int) !void {
         const num_src_pages = mupdf.pdf_count_pages(self.handle, src_pdf);
         if (num_pages > num_src_pages) return error.InvalidPageCount;
         const graft_map = mupdf.pdf_new_graft_map(self.handle, dest_pdf);
-        var dest_index = dest_offset;
         var i: c_int = 0;
         while (i < num_pages) : (i += 1) {
-            mupdf.pdf_graft_mapped_page(self.handle, graft_map, dest_index, src_pdf, i);
-            dest_index += 1;
+            mupdf.pdf_graft_mapped_page(self.handle, graft_map, -1, src_pdf, src_offset + i);
         }
         mupdf.pdf_drop_graft_map(self.handle, graft_map);
     }
@@ -119,7 +163,14 @@ pub const Context = struct {
         }
     }
 
-    pub fn combineBatch(self: *Self, output_buffer: []u8) !u64 {
+    pub fn generateOutput(self: *Self, output_buffer: []u8, indices: []usize) !u64 {
+        const num_pdfs = self.batchLength();
+        if (indices.len > 0) {
+            for (indices) |item| {
+                if (item >= num_pdfs) return MuPdfError.IndexOutOfRange;
+            }
+        }
+
         var output_doc = self.createPdf() catch |e| {
             std.log.err("received '{s}' from MuPdfWrapper", .{@errorName(e)});
             return MuPdfError.DocumentOperation;
@@ -131,19 +182,23 @@ pub const Context = struct {
 
         const fz_output = mupdf.fz_new_output_with_buffer(self.handle, fz_buffer) orelse unreachable;
         defer {
-            mupdf.fz_drop_buffer(self.handle, fz_buffer);
             mupdf.fz_drop_output(self.handle, fz_output);
+            mupdf.fz_drop_buffer(self.handle, fz_buffer);
         }
 
-        var num_output_pages: c_int = 0;
         var total_size: u64 = 0;
-        for (self.batch().items) |item| {
-            total_size += item.memory.len;
-            const src_pdf = self.createPdfFromStream(item) catch unreachable;
-            defer self.destroyPdf(src_pdf);
-            const num_src_pages = self.getPageCount(src_pdf);
-            try copyPagesToPdf(self, src_pdf, output_doc, num_output_pages, num_src_pages);
-            num_output_pages += num_src_pages;
+        if (indices.len > 0) {
+            const batch_items = self.currentOutputItems();
+            for (indices) |pdf_index| {
+                const item = batch_items[pdf_index];
+                total_size += item.memory.len;
+                try graftPagesOntoOutput(self, item.pdf_handle, output_doc, item.page_offset, item.length);
+            }
+        } else {
+            for (self.currentOutputItems()) |item| {
+                total_size += item.memory.len;
+                try graftPagesOntoOutput(self, item.pdf_handle, output_doc, item.page_offset, item.length);
+            }
         }
 
         const opts = &mupdf.pdf_default_write_options;
@@ -154,7 +209,13 @@ pub const Context = struct {
     }
 
     pub fn batchSize(self: Self) u64 {
-        return self.current_batch_size;
+        return self.current_output_size;
+    }
+
+    pub fn batchLength(self: Self) u64 {
+        if (self.current_output_items) |batch| {
+            return batch.items.len;
+        } else return 0;
     }
 };
 
@@ -203,14 +264,14 @@ fn destroyContext(ctx: *mupdf.fz_context) void {
     mupdf.fz_drop_context(ctx);
 }
 
-fn createPdfFromStream(ctx: *mupdf.fz_context, stream: *mupdf.fz_stream) !*mupdf.pdf_document {
+fn createPdfFromStream(ctx: *mupdf.fz_context, stream: *mupdf.fz_stream) MuPdfError!*mupdf.pdf_document {
     var mark: ?*mupdf.sigjmp_buf = null;
     var dest_doc: ?*mupdf.pdf_document = null;
     if (fzTry(ctx, @ptrCast(**mupdf.sigjmp_buf, &mark))) {
         dest_doc = mupdf.pdf_open_document_with_stream(ctx, stream);
     }
     if (fzCatch(ctx)) {
-        return error.MuPdfCreateDocument;
+        return MuPdfError.DocumentOpen;
     }
     return dest_doc.?;
 }
@@ -226,4 +287,14 @@ fn createPdf(ctx: *mupdf.fz_context) !*mupdf.pdf_document {
     }
 
     return dest_doc.?;
+}
+
+fn warningHandler(userdata: ?*anyopaque, msg: [*c]const u8) callconv(.C) void {
+    _ = userdata;
+    _ = msg;
+}
+
+fn errorHandler(userdata: ?*anyopaque, msg: [*c]const u8) callconv(.C) void {
+    _ = userdata;
+    _ = msg;
 }

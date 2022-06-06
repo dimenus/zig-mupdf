@@ -13,8 +13,8 @@ pub fn build(b: *std.build.Builder) !void {
     const mode = b.standardReleaseOptions();
 
     const src_main = "src/lib.zig";
-    const mupdf_lib_path = "third-party/mupdf/build/shared-debug";
-    const lib_list = [_][]const u8{"mupdf"};
+    const mupdf_lib_path = "third-party/mupdf/build/debug";
+    const lib_list = [_][]const u8{ "mupdf", "mupdf-threads", "mupdf-pkcs7", "mupdf-third" };
 
     const lib = b.addSharedLibrary("zmupdf", src_main, .unversioned);
     lib.setTarget(target);
