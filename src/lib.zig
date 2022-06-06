@@ -14,6 +14,7 @@ comptime {
     @export(addToOutput, .{ .name = "zmupdf_output_add", .linkage = .Strong });
     @export(addSelectedToOutput, .{ .name = "zmupdf_output_add_selected", .linkage = .Strong });
     @export(generateOutput, .{ .name = "zmupdf_output_combine", .linkage = .Strong });
+    @export(outputSize, .{ .name = "zmupdf_output_size", .linkage = .Strong });
 }
 
 const LibContext = extern struct { handle: *mupdf.Context };
@@ -74,7 +75,6 @@ fn addSelectedToOutput(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize, raw_mi
         mupdf.MuPdfError.IndexOutOfRange => return .invalid_parameter,
         else => return .unexpected_error,
     };
-
     return .none;
 }
 
@@ -87,8 +87,8 @@ fn addToOutput(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize) callconv(.C) M
     return .none;
 }
 
-fn batchSize(ctx: *LibContext) callconv(.C) u64 {
-    return ctx.handle.batchSize();
+fn outputSize(ctx: *LibContext) callconv(.C) u64 {
+    return ctx.handle.outputSize();
 }
 
 fn generateOutput(ctx: *LibContext, output_buffer: ?[*]u8, raw_size: ?*usize, raw_indices: ?[*]usize, num_indices: usize) callconv(.C) MupdfLibError {
@@ -99,7 +99,7 @@ fn generateOutput(ctx: *LibContext, output_buffer: ?[*]u8, raw_size: ?*usize, ra
     const size = raw_size.?.*;
     if (size == 0) return .invalid_parameter;
     if (output_buffer == null) return .invalid_parameter;
-    const batch_size = ctx.handle.batchSize();
+    const batch_size = ctx.handle.outputSize();
     if (batch_size == 0) return .invalid_state;
     if (size < batch_size) return .buffer_too_small;
 
@@ -146,7 +146,7 @@ test "create simple output" {
     try loadSample(allocator, ctx, "samples/combineFilesInput1.pdf");
     try loadSample(allocator, ctx, "samples/combineFilesInput2.pdf");
 
-    var buffer_size = batchSize(ctx);
+    var buffer_size = outputSize(ctx);
     var output_buf = try allocator.alloc(u8, @intCast(usize, buffer_size));
     defer allocator.free(output_buf);
     err_code = generateOutput(ctx, output_buf.ptr, &buffer_size, null, 0);
@@ -173,7 +173,7 @@ test "create reordered output" {
     try loadSample(allocator, ctx, "samples/combineFilesInput1.pdf");
     try loadSample(allocator, ctx, "samples/combineFilesInput2.pdf");
 
-    var buffer_size = batchSize(ctx);
+    var buffer_size = outputSize(ctx);
     var output_buf = try allocator.alloc(u8, @intCast(usize, buffer_size));
     defer allocator.free(output_buf);
     const indices = &[_]usize{ 1, 0 };
@@ -201,7 +201,7 @@ test "create sliced output" {
     try loadPartialSample(allocator, ctx, "samples/combineFilesInput1.pdf", 2, 2);
     try loadPartialSample(allocator, ctx, "samples/combineFilesInput2.pdf", 1, CINT_NO_VALUE);
 
-    var buffer_size = batchSize(ctx);
+    var buffer_size = outputSize(ctx);
     var output_buf = try allocator.alloc(u8, @intCast(usize, buffer_size));
     defer allocator.free(output_buf);
     err_code = generateOutput(ctx, output_buf.ptr, &buffer_size, null, 0);

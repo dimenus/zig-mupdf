@@ -208,7 +208,7 @@ pub const Context = struct {
         return @intCast(u64, fz_buffer.len);
     }
 
-    pub fn batchSize(self: Self) u64 {
+    pub fn outputSize(self: Self) u64 {
         return self.current_output_size;
     }
 
