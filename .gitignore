@@ -1,6 +1,5 @@
-third-party
 zig-cache
 zig-out
-outputs
+outputs/*
 src/*.un~
 *.un~
