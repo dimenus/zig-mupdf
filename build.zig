@@ -1,4 +1,5 @@
 const std = @import("std");
+const zbs = std.build;
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn build(b: *std.build.Builder) !void {
@@ -12,11 +13,11 @@ pub fn build(b: *std.build.Builder) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const src_main = "src/lib.zig";
     const mupdf_lib_path = "third-party/mupdf/build/release";
     const lib_list = [_][]const u8{ "mupdf", "mupdf-threads", "mupdf-pkcs7", "mupdf-third" };
 
-    const lib = b.addSharedLibrary("zmupdf", src_main, .unversioned);
+    const lib = b.addSharedLibrary("zmupdf", "src/shared_lib/public.zig", .unversioned);
+    lib.addPackagePath("zmupdf", "src/core/lib.zig");
     lib.setTarget(target);
     lib.linkLibC();
     lib.setBuildMode(mode);
@@ -26,8 +27,9 @@ pub fn build(b: *std.build.Builder) !void {
     }
     lib.install();
 
-    const lib_tests = b.addTest(src_main);
+    const lib_tests = b.addTest("src/shared_lib/tests.zig");
     lib_tests.linkLibC();
+    lib_tests.addPackagePath("zmupdf", "src/core/lib.zig");
     lib_tests.addLibPath(mupdf_lib_path);
     lib_tests.setTarget(target);
     for (lib_list) |name| {
