@@ -16,7 +16,7 @@ comptime {
     @export(saveOutput, .{ .name = "zmupdf_output_save", .linkage = .Strong });
     @export(openInputPath, .{ .name = "zmupdf_input_open_path", .linkage = .Strong });
     @export(dropInput, .{ .name = "zmupdf_input_drop", .linkage = .Strong });
-
+    @export(getInputPageCount, .{ .name = "zmupdf_input_get_page_count", .linkage = .Strong });
     @export(copyPageRange, .{ .name = "zmupdf_output_copy_pages", .linkage = .Strong });
 }
 
@@ -108,6 +108,17 @@ pub fn copyPageRange(raw_ctx: ?*LibContext, src_pdf_index: usize, start_index: c
         if (start_index + length > num_pages) return .invalid_parameter;
         ctx.handle.graftPagesOntoOutput(pdf_handle, ctx.handle.dest_pdf.?, start_index, length) catch unreachable;
     } else return .invalid_parameter;
+
+    return .none;
+}
+
+pub fn getInputPageCount(raw_ctx: ?*LibContext, raw_pdf_handle: usize, output_page_count: *usize) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    if (raw_pdf_handle >= ctx.handle.sourceListLength()) return .invalid_parameter;
+    const input_item = ctx.handle.currentSourceItems()[raw_pdf_handle];
+    if (input_item.pdf_handle) |pdf_handle| {
+        output_page_count.* = @intCast(usize, ctx.handle.getPageCount(pdf_handle));
+    } else return .invalid_operation;
 
     return .none;
 }

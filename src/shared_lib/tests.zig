@@ -116,11 +116,19 @@ test "create sliced output" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
-    defer temp_allocator.deinit();
-
     const first_pdf = try loadSample(ctx, "samples/combineFilesInput1.pdf");
 
     const err_code = public_api.copyPageRange(ctx, first_pdf, 2, 4);
     try std.testing.expect(err_code == .invalid_parameter);
+}
+
+test "get input page count" {
+    const ctx = public_api.startup() orelse unreachable;
+    defer public_api.shutdown(ctx);
+    try ctx.handle.openOutput();
+
+    const first_pdf = try loadSample(ctx, "samples/combineFilesInput1.pdf");
+    var num_pages: usize = 0;
+    try expectNoError(public_api.getInputPageCount(ctx, first_pdf, &num_pages));
+    try std.testing.expect(num_pages == 4);
 }
