@@ -2,6 +2,8 @@ const std = @import("std");
 const mupdf = @import("zmupdf");
 const Allocator = std.mem.Allocator;
 
+const MAX_PATH_BYTES = std.fs.MAX_PATH_BYTES;
+
 const page_allocator = std.heap.page_allocator;
 
 pub const CINT_NO_VALUE = -1;
@@ -11,19 +13,17 @@ comptime {
     @export(shutdown, .{ .name = "zmupdf_shutdown", .linkage = .Strong });
     @export(openOutput, .{ .name = "zmupdf_output_open", .linkage = .Strong });
     @export(dropOutput, .{ .name = "zmupdf_output_drop", .linkage = .Strong });
-    @export(addToOutput, .{ .name = "zmupdf_output_add", .linkage = .Strong });
-    @export(addSelectedToOutput, .{ .name = "zmupdf_output_add_selected", .linkage = .Strong });
-    @export(generateOutput, .{ .name = "zmupdf_output_combine", .linkage = .Strong });
-    @export(outputPageCount, .{ .name = "zmupdf_output_page_count", .linkage = .Strong });
+    @export(saveOutput, .{ .name = "zmupdf_output_save", .linkage = .Strong });
+    @export(copyPageRange, .{ .name = "zmupdf_output_copy_pages", .linkage = .Strong });
 }
 
 pub const ZMuPdfLibError = enum(u32) {
     none,
-    unexpected_error,
-    invalid_state,
+    internal_error,
+    invalid_context,
+    invalid_operation,
     invalid_parameter,
-    buffer_too_small,
-    invalid_file_type,
+    operation_error,
 };
 
 pub const LibContext = extern struct { handle: *mupdf.Context };
@@ -47,92 +47,69 @@ pub fn startup() callconv(.C) ?*LibContext {
     return context;
 }
 
-pub fn shutdown(ctx: *LibContext) callconv(.C) void {
+pub fn shutdown(raw_ctx: ?*LibContext) callconv(.C) void {
+    const ctx = raw_ctx orelse return;
     ctx.handle.dropOutput();
     ctx.handle.deinit();
     page_allocator.destroy(ctx.handle);
     page_allocator.destroy(ctx);
 }
 
-pub fn openOutput(ctx: *LibContext) callconv(.C) ZMuPdfLibError {
-    ctx.handle.openOutput() catch return .invalid_state;
+pub fn openOutput(raw_ctx: ?*LibContext) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    ctx.handle.openOutput() catch return .invalid_operation;
     return .none;
 }
 
-pub fn dropOutput(ctx: *LibContext) callconv(.C) void {
+pub fn dropOutput(raw_ctx: ?*LibContext) callconv(.C) void {
+    const ctx = raw_ctx orelse return;
     ctx.handle.dropOutput();
 }
 
-pub fn addSelectedToOutput(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize, raw_min_index: c_int, raw_length: c_int) callconv(.C) ZMuPdfLibError {
-    if (raw_buffer == null) return .invalid_parameter;
-    if (size > std.math.maxInt(u32)) return .invalid_parameter;
-    if (raw_min_index < 0) return .invalid_parameter;
+pub fn loadSourcePdfPath(raw_ctx: ?*LibContext, raw_path: ?[*]const u8, length: usize, output_pdf_handle: ?*usize) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    const path = raw_path orelse return .invalid_parameter;
+    if (length == 0) return .invalid_parameter;
+    if (output_pdf_handle == null) return .invalid_parameter;
+    if (length + 1 > MAX_PATH_BYTES) return .internal_error;
 
-    const buf_ptr = @ptrCast([*]const u8, raw_buffer.?)[0..size];
-    const length: ?c_int = if (raw_length <= 0) null else raw_length;
-    ctx.handle.addPdf(buf_ptr, raw_min_index, length) catch |e| switch (e) {
-        mupdf.MuPdfError.DocumentOpen => return .invalid_file_type,
-        mupdf.MuPdfError.IndexOutOfRange => return .invalid_parameter,
-        else => return .unexpected_error,
+    var file_path: [MAX_PATH_BYTES]u8 = undefined;
+    std.mem.copy(u8, file_path[0..length], path[0..length]);
+    file_path[length] = 0;
+    const c_file_path = file_path[0..length :0];
+    output_pdf_handle.?.* = ctx.handle.addPdfFile(c_file_path) catch |e| switch (e) {
+        mupdf.MuPdfError.DocumentOpen => return .invalid_parameter,
+        else => return .internal_error,
     };
+
     return .none;
 }
 
-pub fn addToOutput(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize) callconv(.C) ZMuPdfLibError {
-    if (raw_buffer == null) return .invalid_parameter;
-    if (size > std.math.maxInt(u32)) return .invalid_parameter;
-
-    const buf_ptr = @ptrCast([*]const u8, raw_buffer.?)[0..size];
-    ctx.handle.addPdf(buf_ptr, null, null) catch |e| switch (e) {
-        mupdf.MuPdfError.DocumentOpen => return .invalid_file_type,
-        else => return .unexpected_error,
-    };
-    return .none;
-}
-
-pub fn loadSourcePdf(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize, output_pdf_handle: *usize) callconv(.C) ZMuPdfLibError {
-    if (raw_buffer == null) return .invalid_parameter;
-    if (size > std.math.maxInt(u32)) return .invalid_parameter;
-    const buf_ptr = @ptrCast([*]const u8, raw_buffer.?)[0..size];
-    output_pdf_handle.* = ctx.handle.addPdf2(buf_ptr) catch |e| switch (e) {
-        mupdf.MuPdfError.DocumentOpen => return .invalid_file_type,
-        else => return .unexpected_error,
-    };
-    return .none;
-}
-
-pub fn outputPageCount(ctx: *LibContext) callconv(.C) u64 {
-    return ctx.handle.outputPageCount();
-}
-
-pub fn outputSize(ctx: *LibContext) callconv(.C) u64 {
-    return ctx.handle.outputSize();
-}
-
-pub fn copyPageRange(ctx: *LibContext, src_pdf_index: usize, start_index: usize, length: usize) ZMuPdfLibError {
-    if (ctx.handle.dest_pdf == null) return .invalid_state;
+pub fn copyPageRange(raw_ctx: ?*LibContext, src_pdf_index: usize, start_index: c_int, raw_length: c_int) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    if (ctx.handle.dest_pdf == null) return .invalid_operation;
     if (src_pdf_index >= ctx.handle.sourceListLength()) return .invalid_parameter;
+    if (start_index < 0) return .invalid_parameter;
     const source_item = ctx.handle.currentSourceItems()[src_pdf_index];
-    if (start_index + length > source_item.length) return .invalid_parameter;
-    ctx.handle.graftPagesOntoOutput(source_item.pdf_handle, ctx.handle.dest_pdf.?, @intCast(c_int, start_index), @intCast(c_int, length)) catch unreachable;
+    const num_pages = ctx.handle.getPageCount(source_item.pdf_handle);
+    const length = if (raw_length > 0) raw_length else (num_pages - start_index);
+    if (start_index + length > num_pages) return .invalid_parameter;
+    ctx.handle.graftPagesOntoOutput(source_item.pdf_handle, ctx.handle.dest_pdf.?, start_index, length) catch unreachable;
 
     return .none;
 }
 
-pub fn generateOutput(ctx: *LibContext, output_buffer: ?[*]u8, raw_size: ?*usize, raw_indices: ?[*]usize, num_indices: usize) callconv(.C) ZMuPdfLibError {
-    if (num_indices > ctx.handle.sourceListLength()) return .invalid_parameter;
-    if (num_indices != 0 and raw_indices == null) return .invalid_parameter;
-    if (num_indices == 0 and raw_indices != null) return .invalid_parameter;
-    if (raw_size == null) return .invalid_parameter;
-    const size = raw_size.?.*;
-    if (size == 0) return .invalid_parameter;
-    if (output_buffer == null) return .invalid_parameter;
-    const batch_size = ctx.handle.outputSize();
-    if (batch_size == 0) return .invalid_state;
-    if (size < batch_size) return .buffer_too_small;
+pub fn saveOutput(raw_ctx: ?*LibContext, raw_path: ?[*]u8, length: usize) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    const path = raw_path orelse return .invalid_parameter;
+    if (length == 0) return .invalid_parameter;
+    if (length + 1 > MAX_PATH_BYTES) return .internal_error;
+    if (ctx.handle.dest_pdf) |dest_pdf| {
+        var file_path: [MAX_PATH_BYTES]u8 = undefined;
+        std.mem.copy(u8, file_path[0..length], path[0..length]);
+        file_path[length] = 0;
+        ctx.handle.flushToPath(dest_pdf, @ptrCast([*:0]u8, &file_path)) catch return .operation_error;
+    } else return .invalid_operation;
 
-    const buf_ptr = @ptrCast([*]u8, output_buffer.?)[0..size];
-    const indices = if (raw_indices) |indices| indices[0..num_indices] else &[_]usize{};
-    raw_size.?.* = ctx.handle.generateOutput(buf_ptr, indices) catch return .invalid_parameter;
     return .none;
 }
