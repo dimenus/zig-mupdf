@@ -7,7 +7,7 @@ const page_allocator = std.heap.page_allocator;
 fn loadSample(ctx: *public_api.LibContext, path: []const u8) !usize {
     var err_code = public_api.ZMuPdfLibError.none;
     var pdf_index: usize = 0;
-    err_code = public_api.loadSourcePdfPath(ctx, path.ptr, path.len, &pdf_index);
+    err_code = public_api.openInputPath(ctx, path.ptr, path.len, &pdf_index);
     try expectNoError(err_code);
 
     return pdf_index;
@@ -29,7 +29,7 @@ test "null context checks" {
     public_api.shutdown(null);
     public_api.dropOutput(null);
     try std.testing.expect(public_api.openOutput(null) == .invalid_context);
-    try std.testing.expect(public_api.loadSourcePdfPath(null, "asdf", 4, null) == .invalid_context);
+    try std.testing.expect(public_api.openInputPath(null, "asdf", 4, null) == .invalid_context);
     try std.testing.expect(public_api.copyPageRange(null, 42, -1, -1) == .invalid_context);
     try std.testing.expect(public_api.saveOutput(null, null, 42) == .invalid_context);
 }
@@ -85,10 +85,11 @@ test "create sliced output" {
     defer temp_allocator.deinit();
 
     const first_pdf = try loadSample(ctx, "samples/combineFilesInput1.pdf");
-    const second_pdf = try loadSample(ctx, "samples/combineFilesInput2.pdf");
-
-    try expectNoError(public_api.copyPageRange(ctx, second_pdf, 2, 2));
     try expectNoError(public_api.copyPageRange(ctx, first_pdf, 1, -1));
+    try expectNoError(public_api.dropInput(ctx, first_pdf));
+    const second_pdf = try loadSample(ctx, "samples/combineFilesInput2.pdf");
+    try expectNoError(public_api.copyPageRange(ctx, second_pdf, 2, 2));
+    try expectNoError(public_api.dropInput(ctx, second_pdf));
 
     const output_filename = "outputs/sliced_output.pdf";
     try expectNoError(public_api.saveOutput(ctx, output_filename, output_filename.len));
@@ -106,7 +107,7 @@ test "bad file format" {
 
     const file_path = "samples/foo.json";
     var pdf_handle: usize = 0;
-    const err_code = public_api.loadSourcePdfPath(ctx, file_path, file_path.len, &pdf_handle);
+    const err_code = public_api.openInputPath(ctx, file_path, file_path.len, &pdf_handle);
     try std.testing.expect(err_code == .invalid_parameter);
 }
 

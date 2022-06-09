@@ -19,7 +19,7 @@ pub const MuPdfError = error{
 };
 
 const SourceItem = struct {
-    pdf_handle: *mupdf.pdf_document,
+    pdf_handle: ?*mupdf.pdf_document,
 };
 
 const SourceItemList = std.ArrayList(SourceItem);
@@ -54,7 +54,9 @@ pub const Context = struct {
 
     pub fn deinit(self: Self) void {
         for (self.source_list.items) |item| {
-            file_scope.dropPdf(self.handle, item.pdf_handle);
+            if (item.pdf_handle) |handle| {
+                file_scope.dropPdf(self.handle, handle);
+            }
         }
         self.source_item_arena.deinit();
         destroyContext(self.handle);
@@ -81,6 +83,16 @@ pub const Context = struct {
         self.source_list.append(.{ .pdf_handle = pdf_handle }) catch return MuPdfError.OutOfMemory;
 
         return pdf_index;
+    }
+
+    pub fn releasePdf(self: *Self, pdf_index: usize) !void {
+        const num_pdfs = self.currentSourceItems().len;
+        if (pdf_index >= num_pdfs) return MuPdfError.IndexOutOfRange;
+        const pdf_item = &self.currentSourceItems()[pdf_index];
+        if (pdf_item.pdf_handle) |pdf_handle| {
+            file_scope.dropPdf(self.handle, pdf_handle);
+            pdf_item.pdf_handle = null;
+        } else return MuPdfError.DocumentOperation;
     }
 
     pub fn currentSourceItems(self: *Self) []SourceItem {

@@ -14,6 +14,9 @@ comptime {
     @export(openOutput, .{ .name = "zmupdf_output_open", .linkage = .Strong });
     @export(dropOutput, .{ .name = "zmupdf_output_drop", .linkage = .Strong });
     @export(saveOutput, .{ .name = "zmupdf_output_save", .linkage = .Strong });
+    @export(openInputPath, .{ .name = "zmupdf_input_open_path", .linkage = .Strong });
+    @export(dropInput, .{ .name = "zmupdf_input_drop", .linkage = .Strong });
+
     @export(copyPageRange, .{ .name = "zmupdf_output_copy_pages", .linkage = .Strong });
 }
 
@@ -66,7 +69,7 @@ pub fn dropOutput(raw_ctx: ?*LibContext) callconv(.C) void {
     ctx.handle.dropOutput();
 }
 
-pub fn loadSourcePdfPath(raw_ctx: ?*LibContext, raw_path: ?[*]const u8, length: usize, output_pdf_handle: ?*usize) callconv(.C) ZMuPdfLibError {
+pub fn openInputPath(raw_ctx: ?*LibContext, raw_path: ?[*]const u8, length: usize, output_pdf_handle: ?*usize) callconv(.C) ZMuPdfLibError {
     const ctx = raw_ctx orelse return .invalid_context;
     const path = raw_path orelse return .invalid_parameter;
     if (length == 0) return .invalid_parameter;
@@ -85,16 +88,26 @@ pub fn loadSourcePdfPath(raw_ctx: ?*LibContext, raw_path: ?[*]const u8, length: 
     return .none;
 }
 
+pub fn dropInput(raw_ctx: ?*LibContext, raw_pdf_handle: usize) callconv(.C) ZMuPdfLibError {
+    const ctx = raw_ctx orelse return .invalid_context;
+    if (raw_pdf_handle != 0) return .internal_error;
+    ctx.handle.releasePdf(raw_pdf_handle) catch return .invalid_parameter;
+    ctx.handle.source_list.clearRetainingCapacity();
+    return .none;
+}
+
 pub fn copyPageRange(raw_ctx: ?*LibContext, src_pdf_index: usize, start_index: c_int, raw_length: c_int) callconv(.C) ZMuPdfLibError {
     const ctx = raw_ctx orelse return .invalid_context;
     if (ctx.handle.dest_pdf == null) return .invalid_operation;
     if (src_pdf_index >= ctx.handle.sourceListLength()) return .invalid_parameter;
     if (start_index < 0) return .invalid_parameter;
     const source_item = ctx.handle.currentSourceItems()[src_pdf_index];
-    const num_pages = ctx.handle.getPageCount(source_item.pdf_handle);
-    const length = if (raw_length > 0) raw_length else (num_pages - start_index);
-    if (start_index + length > num_pages) return .invalid_parameter;
-    ctx.handle.graftPagesOntoOutput(source_item.pdf_handle, ctx.handle.dest_pdf.?, start_index, length) catch unreachable;
+    if (source_item.pdf_handle) |pdf_handle| {
+        const num_pages = ctx.handle.getPageCount(pdf_handle);
+        const length = if (raw_length > 0) raw_length else (num_pages - start_index);
+        if (start_index + length > num_pages) return .invalid_parameter;
+        ctx.handle.graftPagesOntoOutput(pdf_handle, ctx.handle.dest_pdf.?, start_index, length) catch unreachable;
+    } else return .invalid_parameter;
 
     return .none;
 }
