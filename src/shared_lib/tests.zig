@@ -2,6 +2,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const public_api = @import("public.zig");
 
+const page_allocator = std.heap.page_allocator;
+
 fn loadPartialSample(allocator: Allocator, ctx: *public_api.LibContext, path: []const u8, min_index: c_int, length: c_int) !void {
     var err_code = public_api.ZMuPdfLibError.none;
     const cwd = std.fs.cwd();
@@ -22,6 +24,19 @@ fn loadSample(allocator: Allocator, ctx: *public_api.LibContext, path: []const u
     try expectNoError(err_code);
 }
 
+fn loadSample2(allocator: Allocator, ctx: *public_api.LibContext, path: []const u8) !usize {
+    var err_code = public_api.ZMuPdfLibError.none;
+    const cwd = std.fs.cwd();
+    const file_handle = try cwd.openFile(path, .{});
+    defer file_handle.close();
+    const file_bytes = try file_handle.readToEndAlloc(allocator, std.math.maxInt(u32));
+    var pdf_index: usize = 0;
+    err_code = public_api.loadSourcePdf(ctx, file_bytes.ptr, file_bytes.len, &pdf_index);
+    try expectNoError(err_code);
+
+    return pdf_index;
+}
+
 fn expectNoError(err: public_api.ZMuPdfLibError) !void {
     if (err == .none) return;
 
@@ -39,25 +54,28 @@ test "create simple output" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    const allocator = ctx.handle.arena_allocator.allocator();
+    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
+    defer temp_allocator.deinit();
+    const allocator = temp_allocator.allocator();
 
-    var err_code = public_api.ZMuPdfLibError.none;
+    const first_pdf = try loadSample2(allocator, ctx, "samples/combineFilesInput1.pdf");
+    const second_pdf = try loadSample2(allocator, ctx, "samples/combineFilesInput2.pdf");
 
-    try loadSample(allocator, ctx, "samples/combineFilesInput1.pdf");
-    try loadSample(allocator, ctx, "samples/combineFilesInput2.pdf");
+    try expectNoError(public_api.copyPageRange(ctx, first_pdf, 0, 4));
+    try expectNoError(public_api.copyPageRange(ctx, second_pdf, 0, 4));
 
-    var buffer_size = public_api.outputSize(ctx);
-    var output_buf = try allocator.alloc(u8, @intCast(usize, buffer_size));
-    defer allocator.free(output_buf);
-    err_code = public_api.generateOutput(ctx, output_buf.ptr, &buffer_size, null, 0);
-    try expectNoError(err_code);
+    //var buffer_size = public_api.outputSize(ctx);
+    //var output_buf = try allocator.alloc(u8, @intCast(usize, buffer_size));
+    //defer allocator.free(output_buf);
+    //err_code = public_api.generateOutput(ctx, output_buf.ptr, &buffer_size, null, 0);
+    //try expectNoError(err_code);
 
-    const output_filename = "outputs/simple_output.pdf";
-    try std.fs.cwd().writeFile(output_filename, output_buf[0..buffer_size]);
+    //const output_filename = "outputs/simple_output.pdf";
+    //try std.fs.cwd().writeFile(output_filename, output_buf[0..buffer_size]);
 
-    const output_file = try std.fs.cwd().openFile(output_filename, .{});
-    defer output_file.close();
-    try std.testing.expect((try output_file.stat()).size == buffer_size);
+    //const output_file = try std.fs.cwd().openFile(output_filename, .{});
+    //defer output_file.close();
+    //try std.testing.expect((try output_file.stat()).size == buffer_size);
     //try std.fs.cwd().deleteFile(output_filename);
 }
 
@@ -66,7 +84,9 @@ test "create reordered output" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    const allocator = ctx.handle.arena_allocator.allocator();
+    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
+    defer temp_allocator.deinit();
+    const allocator = temp_allocator.allocator();
 
     var err_code = public_api.ZMuPdfLibError.none;
 
@@ -94,7 +114,9 @@ test "create sliced output" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    const allocator = ctx.handle.arena_allocator.allocator();
+    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
+    defer temp_allocator.deinit();
+    const allocator = temp_allocator.allocator();
 
     var err_code = public_api.ZMuPdfLibError.none;
 
@@ -123,7 +145,9 @@ test "bad file format" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    const allocator = ctx.handle.arena_allocator.allocator();
+    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
+    defer temp_allocator.deinit();
+    const allocator = temp_allocator.allocator();
 
     var err_code = public_api.ZMuPdfLibError.none;
     const cwd = std.fs.cwd();
@@ -140,7 +164,9 @@ test "bad slice values" {
     defer public_api.shutdown(ctx);
     try ctx.handle.openOutput();
 
-    const allocator = ctx.handle.arena_allocator.allocator();
+    var temp_allocator = std.heap.ArenaAllocator.init(page_allocator);
+    defer temp_allocator.deinit();
+    const allocator = temp_allocator.allocator();
 
     var err_code = public_api.ZMuPdfLibError.none;
     const cwd = std.fs.cwd();

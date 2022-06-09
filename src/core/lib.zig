@@ -15,9 +15,10 @@ pub const MuPdfError = error{
     DocumentSave,
     DocumentOperation,
     IndexOutOfRange,
+    OutOfMemory,
 };
 
-const OutputItem = struct {
+const SourceItem = struct {
     memory: []const u8,
     stream_handle: *mupdf.fz_stream,
     pdf_handle: *mupdf.pdf_document,
@@ -27,23 +28,26 @@ const OutputItem = struct {
 
 const PageIndices = struct { start: c_int, length: c_int };
 
-const OutputItemList = std.ArrayList(OutputItem);
+const SourceItemList = std.ArrayList(SourceItem);
 
 pub const Context = struct {
-    arena_allocator: std.heap.ArenaAllocator,
+    source_item_arena: std.heap.ArenaAllocator,
     scratch_allocator: std.heap.FixedBufferAllocator,
     handle: *mupdf.fz_context,
-    current_output_items: ?OutputItemList,
-    current_output_size: u64,
+    dest_pdf: ?*mupdf.pdf_document = null,
+    source_list: SourceItemList,
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator) !Self {
+    pub fn init(base_allocator: Allocator) !Self {
         const mupdf_context = try createContext();
         errdefer destroyContext(mupdf_context);
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        const scratch_buffer = try arena.allocator().alloc(u8, 1024 * 1024 * 4);
-        return Self{ .arena_allocator = std.heap.ArenaAllocator.init(allocator), .scratch_allocator = std.heap.FixedBufferAllocator.init(scratch_buffer), .handle = mupdf_context, .current_output_items = null, .current_output_size = 0 };
+        var arena = std.heap.ArenaAllocator.init(base_allocator);
+        const allocator = arena.allocator();
+        const scratch_buffer = try allocator.alloc(u8, 1024 * 1024 * 4);
+        errdefer allocator.free(scratch_buffer);
+        const source_list = try SourceItemList.initCapacity(allocator, 1024);
+        return Self{ .source_item_arena = arena, .scratch_allocator = std.heap.FixedBufferAllocator.init(scratch_buffer), .handle = mupdf_context, .source_list = source_list };
     }
 
     pub fn hideWarnings(self: *Self) void {
@@ -55,27 +59,41 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: Self) void {
-        self.arena_allocator.deinit();
+        self.source_item_arena.deinit();
         destroyContext(self.handle);
     }
 
     pub fn openOutput(self: *Self) !void {
-        if (self.current_output_items) |_| {
+        if (self.dest_pdf) |_| {
             return error.ExistingOutput;
         }
 
-        const allocator = self.arena_allocator.allocator();
-        self.current_output_items = try OutputItemList.initCapacity(allocator, 1024);
+        self.dest_pdf = try self.createPdf();
     }
 
     pub fn dropOutput(self: *Self) void {
-        if (self.current_output_items) |curr_batch| {
-            for (curr_batch.items) |item| {
-                self.destroyPdf(item.pdf_handle);
-                mupdf.fz_drop_stream(self.handle, item.stream_handle);
-            }
-            self.current_output_items.?.clearRetainingCapacity();
-        } else return;
+        if (self.dest_pdf == null) return;
+        self.destroyPdf(self.dest_pdf.?);
+        self.dest_pdf = null;
+    }
+
+    pub fn addPdf2(self: *Self, client_buffer: []const u8) !usize {
+        const arena_buffer = self.source_item_arena.allocator().alloc(u8, client_buffer.len) catch |e| switch (e) {
+            error.OutOfMemory => return MuPdfError.OutOfMemory,
+            else => return e,
+        };
+        std.mem.copy(u8, arena_buffer, client_buffer);
+        const fz_stream = mupdf.fz_open_memory(self.handle, arena_buffer.ptr, arena_buffer.len) orelse unreachable;
+        errdefer mupdf.fz_drop_stream(self.handle, fz_stream);
+
+        const pdf_handle = try file_scope.createPdfFromStream(self.handle, fz_stream);
+        const num_pages = self.getPageCount(pdf_handle);
+        const pdf_index = self.currentSourceItems().len;
+        self.source_list.append(
+            .{ .page_offset = 0, .length = num_pages, .memory = arena_buffer, .stream_handle = fz_stream, .pdf_handle = pdf_handle },
+        ) catch return MuPdfError.OutOfMemory;
+
+        return pdf_index;
     }
 
     pub fn addPdf(self: *Self, buffer: []const u8, raw_page_offset: ?c_int, raw_length: ?c_int) MuPdfError!void {
@@ -99,15 +117,13 @@ pub const Context = struct {
             } else break :max num_pages - page_offset;
         };
 
-        self.current_output_size += buffer.len;
-        self.current_output_items.?.append(
+        self.source_list.append(
             .{ .page_offset = page_offset, .length = length, .memory = buffer, .stream_handle = fz_stream, .pdf_handle = pdf_handle },
-        ) catch unreachable;
+        ) catch return MuPdfError.OutOfMemory;
     }
 
-    fn currentOutputItems(self: *Self) []OutputItem {
-        if (self.current_output_items == null) unreachable;
-        return self.current_output_items.?.items;
+    pub fn currentSourceItems(self: *Self) []SourceItem {
+        return self.source_list.items;
     }
 
     fn createPdf(self: Self) !*mupdf.pdf_document {
@@ -118,7 +134,7 @@ pub const Context = struct {
         return file_scope.destroyPdf(self.handle, doc);
     }
 
-    fn getPageCount(self: *Self, src_pdf: *mupdf.pdf_document) c_int {
+    fn getPageCount(self: Self, src_pdf: *mupdf.pdf_document) c_int {
         var num_pages: ?c_int = null;
         var mark: ?*mupdf.sigjmp_buf = null;
         if (fzTry(self.handle, @ptrCast(**mupdf.sigjmp_buf, &mark))) {
@@ -141,7 +157,7 @@ pub const Context = struct {
         return graft_map.?;
     }
 
-    fn graftPagesOntoOutput(self: *Self, src_pdf: *mupdf.pdf_document, dest_pdf: *mupdf.pdf_document, src_offset: c_int, num_pages: c_int) !void {
+    pub fn graftPagesOntoOutput(self: *Self, src_pdf: *mupdf.pdf_document, dest_pdf: *mupdf.pdf_document, src_offset: c_int, num_pages: c_int) !void {
         const num_src_pages = mupdf.pdf_count_pages(self.handle, src_pdf);
         if (num_pages > num_src_pages) return error.InvalidPageCount;
         const graft_map = mupdf.pdf_new_graft_map(self.handle, dest_pdf);
@@ -164,7 +180,7 @@ pub const Context = struct {
     }
 
     pub fn generateOutput(self: *Self, output_buffer: []u8, indices: []usize) !u64 {
-        const num_pdfs = self.batchLength();
+        const num_pdfs = self.sourceListLength();
         if (indices.len > 0) {
             for (indices) |item| {
                 if (item >= num_pdfs) return MuPdfError.IndexOutOfRange;
@@ -188,14 +204,14 @@ pub const Context = struct {
 
         var total_size: u64 = 0;
         if (indices.len > 0) {
-            const batch_items = self.currentOutputItems();
+            const batch_items = self.currentSourceItems();
             for (indices) |pdf_index| {
                 const item = batch_items[pdf_index];
                 total_size += item.memory.len;
                 try graftPagesOntoOutput(self, item.pdf_handle, output_doc, item.page_offset, item.length);
             }
         } else {
-            for (self.currentOutputItems()) |item| {
+            for (self.currentSourceItems()) |item| {
                 total_size += item.memory.len;
                 try graftPagesOntoOutput(self, item.pdf_handle, output_doc, item.page_offset, item.length);
             }
@@ -208,14 +224,20 @@ pub const Context = struct {
         return @intCast(u64, fz_buffer.len);
     }
 
-    pub fn outputSize(self: Self) u64 {
-        return self.current_output_size;
+    pub fn outputPageCount(self: Self) u64 {
+        if (self.dest_pdf) |dest_pdf| {
+            return @intCast(u64, self.getPageCount(dest_pdf));
+        } else return 0;
     }
 
-    pub fn batchLength(self: Self) u64 {
-        if (self.current_output_items) |batch| {
-            return batch.items.len;
+    pub fn outputSize(self: Self) u64 {
+        if (self.dest_pdf) |dest_pdf| {
+            return dest_pdf.stream_handle.pos;
         } else return 0;
+    }
+
+    pub fn sourceListLength(self: Self) u64 {
+        return self.source_list.items.len;
     }
 };
 

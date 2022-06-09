@@ -14,7 +14,7 @@ comptime {
     @export(addToOutput, .{ .name = "zmupdf_output_add", .linkage = .Strong });
     @export(addSelectedToOutput, .{ .name = "zmupdf_output_add_selected", .linkage = .Strong });
     @export(generateOutput, .{ .name = "zmupdf_output_combine", .linkage = .Strong });
-    @export(outputSize, .{ .name = "zmupdf_output_size", .linkage = .Strong });
+    @export(outputPageCount, .{ .name = "zmupdf_output_page_count", .linkage = .Strong });
 }
 
 pub const ZMuPdfLibError = enum(u32) {
@@ -85,18 +85,42 @@ pub fn addToOutput(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize) callconv(.
     const buf_ptr = @ptrCast([*]const u8, raw_buffer.?)[0..size];
     ctx.handle.addPdf(buf_ptr, null, null) catch |e| switch (e) {
         mupdf.MuPdfError.DocumentOpen => return .invalid_file_type,
-        mupdf.MuPdfError.IndexOutOfRange => return .invalid_parameter,
         else => return .unexpected_error,
     };
     return .none;
+}
+
+pub fn loadSourcePdf(ctx: *LibContext, raw_buffer: ?[*]u8, size: usize, output_pdf_handle: *usize) callconv(.C) ZMuPdfLibError {
+    if (raw_buffer == null) return .invalid_parameter;
+    if (size > std.math.maxInt(u32)) return .invalid_parameter;
+    const buf_ptr = @ptrCast([*]const u8, raw_buffer.?)[0..size];
+    output_pdf_handle.* = ctx.handle.addPdf2(buf_ptr) catch |e| switch (e) {
+        mupdf.MuPdfError.DocumentOpen => return .invalid_file_type,
+        else => return .unexpected_error,
+    };
+    return .none;
+}
+
+pub fn outputPageCount(ctx: *LibContext) callconv(.C) u64 {
+    return ctx.handle.outputPageCount();
 }
 
 pub fn outputSize(ctx: *LibContext) callconv(.C) u64 {
     return ctx.handle.outputSize();
 }
 
+pub fn copyPageRange(ctx: *LibContext, src_pdf_index: usize, start_index: usize, length: usize) ZMuPdfLibError {
+    if (ctx.handle.dest_pdf == null) return .invalid_state;
+    if (src_pdf_index >= ctx.handle.sourceListLength()) return .invalid_parameter;
+    const source_item = ctx.handle.currentSourceItems()[src_pdf_index];
+    if (start_index + length > source_item.length) return .invalid_parameter;
+    ctx.handle.graftPagesOntoOutput(source_item.pdf_handle, ctx.handle.dest_pdf.?, @intCast(c_int, start_index), @intCast(c_int, length)) catch unreachable;
+
+    return .none;
+}
+
 pub fn generateOutput(ctx: *LibContext, output_buffer: ?[*]u8, raw_size: ?*usize, raw_indices: ?[*]usize, num_indices: usize) callconv(.C) ZMuPdfLibError {
-    if (num_indices > ctx.handle.batchLength()) return .invalid_parameter;
+    if (num_indices > ctx.handle.sourceListLength()) return .invalid_parameter;
     if (num_indices != 0 and raw_indices == null) return .invalid_parameter;
     if (num_indices == 0 and raw_indices != null) return .invalid_parameter;
     if (raw_size == null) return .invalid_parameter;
