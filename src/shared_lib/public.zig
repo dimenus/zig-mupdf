@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 
 const MAX_PATH_BYTES = std.fs.MAX_PATH_BYTES;
 
-const page_allocator = std.heap.page_allocator;
+const c_allocator = std.heap.c_allocator;
 
 pub const CINT_NO_VALUE = -1;
 
@@ -26,23 +26,22 @@ pub const ZMuPdfLibError = enum(u32) {
     invalid_context,
     invalid_operation,
     invalid_parameter,
-    operation_error,
 };
 
 pub const LibContext = extern struct { handle: *mupdf.Context };
 
 pub fn startup() callconv(.C) ?*LibContext {
-    var context = page_allocator.create(LibContext) catch {
+    var context = c_allocator.create(LibContext) catch {
         return null;
     };
-    var handle_ptr = page_allocator.create(mupdf.Context) catch {
-        page_allocator.destroy(context);
+    var handle_ptr = c_allocator.create(mupdf.Context) catch {
+        c_allocator.destroy(context);
         return null;
     };
 
-    handle_ptr.* = mupdf.Context.init(page_allocator) catch {
-        page_allocator.destroy(context);
-        page_allocator.destroy(handle_ptr);
+    handle_ptr.* = mupdf.Context.init(c_allocator) catch {
+        c_allocator.destroy(context);
+        c_allocator.destroy(handle_ptr);
         return null;
     };
 
@@ -54,8 +53,8 @@ pub fn shutdown(raw_ctx: ?*LibContext) callconv(.C) void {
     const ctx = raw_ctx orelse return;
     ctx.handle.dropOutput();
     ctx.handle.deinit();
-    page_allocator.destroy(ctx.handle);
-    page_allocator.destroy(ctx);
+    c_allocator.destroy(ctx.handle);
+    c_allocator.destroy(ctx);
 }
 
 pub fn openOutput(raw_ctx: ?*LibContext) callconv(.C) ZMuPdfLibError {
@@ -132,7 +131,7 @@ pub fn saveOutput(raw_ctx: ?*LibContext, raw_path: ?[*]u8, length: usize) callco
         var file_path: [MAX_PATH_BYTES]u8 = undefined;
         std.mem.copy(u8, file_path[0..length], path[0..length]);
         file_path[length] = 0;
-        ctx.handle.flushToPath(dest_pdf, @ptrCast([*:0]u8, &file_path)) catch return .operation_error;
+        ctx.handle.flushToPath(dest_pdf, @ptrCast([*:0]u8, &file_path)) catch return .internal_error;
     } else return .invalid_operation;
 
     return .none;

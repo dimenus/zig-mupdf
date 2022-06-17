@@ -6,8 +6,6 @@ const Allocator = std.mem.Allocator;
 
 const file_scope = @This();
 
-const page_allocator = std.heap.page_allocator;
-
 pub const MuPdfError = error{
     ContextCreate,
     DocumentCreate,
